@@ -9,6 +9,10 @@ on:
       electron_version:
         description: version inside that zip
         default: "44.2.0"
+      server_only:
+        description: only build and test the server bundle (fast)
+        type: boolean
+        default: false
       app_version:
         description: version string for the app and server bundle
         default: "2.3.0"
@@ -56,6 +60,22 @@ jobs:
           printf '%s' "$OPENCODE_VERSION" > packages/desktop/resources/opencode-cli.version
           ls -la packages/desktop/resources/win7/server
 
+      - name: Make server bundle load on Node 22
+        shell: bash
+        run: |
+          cat > fix-bundle.cjs <<'EOF'
+          const fs = require("fs")
+          const p = "packages/desktop/resources/win7/server/opencode.mjs"
+          let s = fs.readFileSync(p, "utf8")
+          const a = "getAssetKeys as __ocAssetKeys,"
+          const b = "const __filename=import.meta.filename,"
+          if (!s.includes(a) || !s.includes(b)) throw new Error("bundle prelude not found")
+          s = s.replace(a, "").replace(b, "const __ocAssetKeys=()=>[];" + b)
+          fs.writeFileSync(p, s)
+          console.log("patched node:sea import")
+          EOF
+          node fix-bundle.cjs
+
       - name: Smoke test server bundle on Node 22.19
         uses: actions/setup-node@v4
         with:
@@ -63,9 +83,12 @@ jobs:
       - name: Run server bundle with Node 22
         shell: bash
         continue-on-error: true
-        run: node packages/desktop/resources/win7/server/opencode.mjs --version
+        run: |
+          node packages/desktop/resources/win7/server/opencode.mjs --version
+          node packages/desktop/resources/win7/server/opencode.mjs --help | head -20
 
       - name: Download legacy Electron
+        if: ${{ !inputs.server_only }}
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "${{ inputs.electron_url }}" -OutFile electron.zip
@@ -73,6 +96,7 @@ jobs:
           Get-ChildItem electron-dist | Select-Object -First 20
 
       - name: Build desktop app
+        if: ${{ !inputs.server_only }}
         shell: bash
         working-directory: packages/desktop
         env:
@@ -85,6 +109,7 @@ jobs:
           bunx electron-builder --win --x64 --publish never --config electron-builder.config.ts
 
       - name: Upload portable folder
+        if: ${{ !inputs.server_only }}
         uses: actions/upload-artifact@v4
         with:
           name: opencode-win7-portable
@@ -92,6 +117,7 @@ jobs:
           retention-days: 7
 
       - name: Upload installer
+        if: ${{ !inputs.server_only }}
         uses: actions/upload-artifact@v4
         with:
           name: opencode-win7-installer
