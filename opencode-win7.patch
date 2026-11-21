@@ -1,0 +1,118 @@
+--- a/packages/desktop/src/main/service/desktop-cli.ts
++++ b/packages/desktop/src/main/service/desktop-cli.ts
+@@ -2,6 +2,7 @@
+ 
+ import { execFile, spawn } from "node:child_process"
+ import { existsSync, readFileSync } from "node:fs"
++import nodePath from "node:path"
+ import { promisify } from "node:util"
+ import { app } from "electron"
+ import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
+@@ -89,6 +90,14 @@
+ 
+   yield* Effect.logInfo("v2 CLI executable resolved", { bundled, packaged: app.isPackaged })
+   const version = yield* bundledVersion(bundled)
++
++  // Windows 7/8/8.1 build: the Bun/Node 26 executable cannot start there, so the server bundle runs on a
++  // legacy-compatible node.exe shipped in resources/win7 (see WIN7-BUILD.md).
++  const legacy = legacyServer()
++  if (legacy) {
++    yield* Effect.logInfo("v2 CLI using legacy Node runtime", legacy)
++    return { version, binary: undefined, command: [legacy.node, legacy.entry] }
++  }
+   const binary = app.isPackaged || isolated ? yield* installCli(bundled, version) : bundled
+ 
+   return { version, binary, command: [binary] }
+@@ -226,6 +235,13 @@
+   )
+ })
+ 
++function legacyServer() {
++  if (process.platform !== "win32" || !app.isPackaged) return undefined
++  const node = nodePath.join(process.resourcesPath, "win7", "node.exe")
++  const entry = nodePath.join(process.resourcesPath, "win7", "server", "opencode.mjs")
++  return existsSync(node) && existsSync(entry) ? { node, entry } : undefined
++}
++
+ function executableName() {
+   return process.platform === "win32" ? "opencode-cli.exe" : "opencode-cli"
+ }
+--- a/packages/desktop/src/main/lifecycle/configure.ts
++++ b/packages/desktop/src/main/lifecycle/configure.ts
+@@ -1,7 +1,7 @@
+ import { randomUUID } from "node:crypto"
+ import { mkdirSync, rmSync } from "node:fs"
+ import { enableCompileCache } from "node:module"
+-import { homedir, tmpdir } from "node:os"
++import { homedir, release, tmpdir } from "node:os"
+ import path from "node:path"
+ import { app } from "electron"
+ import { debugBuild, memoryLogInterval } from "@opencode/gui-plugins/debug/options"
+@@ -31,6 +31,8 @@
+   // Chromium animates each mouse-wheel notch on Linux; native Linux apps scroll by the full delta immediately.
+   if (process.platform === "linux") app.commandLine.appendSwitch("disable-smooth-scrolling")
+ 
++  applyLowEndSwitches()
++
+   const build = { packaged: app.isPackaged, channel: CHANNEL }
+ 
+   const debug = debuggingSwitches(build, process.env.OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT,
+@@ -99,3 +101,17 @@
+ 
+   return root
+ }
++
++// Windows 7/8/8.1 (NT 6.x) PCs and anything started with OPENCODE_LOWEND=1 get a lighter Chromium:
++// fewer renderer processes, no smooth-scroll animation, low-end memory mode. OPENCODE_DISABLE_GPU=1 turns
++// off hardware acceleration for machines whose old graphics drivers crash the GPU process.
++function applyLowEndSwitches() {
++  const legacyWindows = process.platform === "win32" && Number.parseInt(release().split(".")[0] ?? "10", 10) < 10
++  const lowEnd = legacyWindows || process.env.OPENCODE_LOWEND === "1"
++  if (process.env.OPENCODE_DISABLE_GPU === "1") app.disableHardwareAcceleration()
++  if (!lowEnd || process.env.OPENCODE_LOWEND === "0") return
++  app.commandLine.appendSwitch("disable-smooth-scrolling")
++  app.commandLine.appendSwitch("enable-low-end-device-mode")
++  app.commandLine.appendSwitch("renderer-process-limit", "2")
++  app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion,HardwareMediaKeyHandling")
++}
+--- a/packages/desktop/electron-builder.config.ts
++++ b/packages/desktop/electron-builder.config.ts
+@@ -66,6 +66,11 @@
+   const desktopName = `${appId}.desktop`
+ 
+   return {
++    // Windows 7/8/8.1 build: OPENCODE_ELECTRON_DIST points at an unpacked electron-legacy release and
++    // OPENCODE_ELECTRON_VERSION names its version (see WIN7-BUILD.md).
++    ...(process.env.OPENCODE_ELECTRON_DIST
++      ? { electronDist: process.env.OPENCODE_ELECTRON_DIST, electronVersion: process.env.OPENCODE_ELECTRON_VERSION }
++      : {}),
+     artifactName: "opencode-desktop-${os}-${arch}.${ext}",
+     directories: {
+       output: "dist",
+@@ -111,6 +116,8 @@
+         to: "",
+         filter: ["opencode-cli", "opencode-cli.exe", "opencode-cli.version"],
+       },
++      // resources/win7/{node.exe,server/opencode.mjs,server/assets} exist only for the legacy Windows build.
++      ...(process.env.OPENCODE_WIN7 === "1" ? [{ from: "resources/win7", to: "win7" }] : []),
+     ],
+     // Electron stores cookies in plain text by default. The browser pane keeps sign-ins, so encrypt them with the OS
+     // key store (Keychain, DPAPI, libsecret or kwallet). This is one-way: turning it off again loses every cookie.
+@@ -139,11 +146,14 @@
+       const resources = context.packager.getResourcesDir(context.appOutDir)
+       await verifyPreviewBinding(resources, context.electronPlatformName, arch)
+       const cli = path.join(resources, context.electronPlatformName === "win32" ? "opencode-cli.exe" : "opencode-cli")
++      const legacyBuild = process.env.OPENCODE_WIN7 === "1"
+ 
+-      const file = await stat(cli)
++      if (!legacyBuild) {
++        const file = await stat(cli)
+ 
+-      if (!file.isFile() || file.size === 0) throw new Error(`Bundled CLI must be a non-empty file: ${cli}`)
+-      await NativeArch.verify(cli, arch)
++        if (!file.isFile() || file.size === 0) throw new Error(`Bundled CLI must be a non-empty file: ${cli}`)
++        await NativeArch.verify(cli, arch)
++      }
+       const version = path.join(path.dirname(cli), "opencode-cli.version")
+ 
+       if ((await stat(version)).size === 0) throw new Error(`Bundled CLI version must be a non-empty file: ${version}`)
