@@ -8,7 +8,7 @@
  import { promisify } from "node:util"
  import { app } from "electron"
  import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
-@@ -89,6 +90,14 @@
+@@ -89,6 +90,18 @@
  
    yield* Effect.logInfo("v2 CLI executable resolved", { bundled, packaged: app.isPackaged })
    const version = yield* bundledVersion(bundled)
@@ -18,12 +18,16 @@
 +  const legacy = legacyServer()
 +  if (legacy) {
 +    yield* Effect.logInfo("v2 CLI using legacy Node runtime", legacy)
-+    return { version, binary: undefined, command: [legacy.node, legacy.entry] }
++    return {
++      version,
++      binary: undefined,
++      command: [legacy.node, "--use-system-ca", "--disable-warning=ExperimentalWarning", legacy.entry],
++    }
 +  }
    const binary = app.isPackaged || isolated ? yield* installCli(bundled, version) : bundled
  
    return { version, binary, command: [binary] }
-@@ -226,6 +235,13 @@
+@@ -226,6 +239,13 @@
    )
  })
  
@@ -77,19 +81,23 @@
 +}
 --- a/packages/desktop/electron-builder.config.ts
 +++ b/packages/desktop/electron-builder.config.ts
-@@ -66,6 +66,11 @@
+@@ -66,6 +66,15 @@
    const desktopName = `${appId}.desktop`
  
    return {
 +    // Windows 7/8/8.1 build: OPENCODE_ELECTRON_DIST points at an unpacked electron-legacy release and
 +    // OPENCODE_ELECTRON_VERSION names its version (see WIN7-BUILD.md).
 +    ...(process.env.OPENCODE_ELECTRON_DIST
-+      ? { electronDist: process.env.OPENCODE_ELECTRON_DIST, electronVersion: process.env.OPENCODE_ELECTRON_VERSION }
++      ? {
++          electronDist: process.env.OPENCODE_ELECTRON_DIST,
++          electronVersion: process.env.OPENCODE_ELECTRON_VERSION,
++          npmRebuild: false,
++        }
 +      : {}),
      artifactName: "opencode-desktop-${os}-${arch}.${ext}",
      directories: {
        output: "dist",
-@@ -111,6 +116,8 @@
+@@ -111,6 +120,8 @@
          to: "",
          filter: ["opencode-cli", "opencode-cli.exe", "opencode-cli.version"],
        },
@@ -98,7 +106,7 @@
      ],
      // Electron stores cookies in plain text by default. The browser pane keeps sign-ins, so encrypt them with the OS
      // key store (Keychain, DPAPI, libsecret or kwallet). This is one-way: turning it off again loses every cookie.
-@@ -139,11 +146,14 @@
+@@ -139,11 +150,14 @@
        const resources = context.packager.getResourcesDir(context.appOutDir)
        await verifyPreviewBinding(resources, context.electronPlatformName, arch)
        const cli = path.join(resources, context.electronPlatformName === "win32" ? "opencode-cli.exe" : "opencode-cli")
