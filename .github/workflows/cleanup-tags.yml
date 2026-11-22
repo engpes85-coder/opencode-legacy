@@ -1,0 +1,43 @@
+name: cleanup-inherited-tags
+
+# One-time cleanup: removes the tags this fork inherited from the original OpenCode repository.
+# Tags that belong to this build (names like v2.3.0-win7.20261215) are always kept.
+# The original repository keeps its own tags; only this fork is changed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type DELETE to really delete. Anything else only lists what would be deleted.
+        default: "no"
+
+permissions:
+  contents: write
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: List tags
+        shell: bash
+        run: |
+          git ls-remote --tags --refs origin | sed 's#.*refs/tags/##' | sort -u > all.txt
+          grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-win7\.[0-9.]+$' all.txt > keep.txt || true
+          grep -vxFf keep.txt all.txt > delete.txt || true
+          echo "Tags in this fork: $(wc -l < all.txt)"
+          echo "Tags that stay (yours): $(wc -l < keep.txt)"
+          cat keep.txt
+          echo "Tags that would be deleted: $(wc -l < delete.txt)"
+          head -20 delete.txt
+
+      - name: Delete the inherited tags
+        if: inputs.confirm == 'DELETE'
+        shell: bash
+        run: |
+          sed 's#^#refs/tags/#' delete.txt | xargs -r -n 100 git push origin --delete
+          echo "Done. Tags left:"
+          git ls-remote --tags --refs origin | wc -l
