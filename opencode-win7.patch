@@ -1,87 +1,172 @@
---- a/packages/desktop/src/main/service/desktop-cli.ts
-+++ b/packages/desktop/src/main/service/desktop-cli.ts
-@@ -2,6 +2,7 @@
+diff --git a/packages/app/src/runtime/i18n/en.ts b/packages/app/src/runtime/i18n/en.ts
+index 5957bc9..9a3ea5f 100644
+--- a/packages/app/src/runtime/i18n/en.ts
++++ b/packages/app/src/runtime/i18n/en.ts
+@@ -1047,6 +1047,8 @@ export const dict = {
+   "settings.about.notices.crates.count.one": "{{count}} crate",
+   "settings.about.notices.crates.count.other": "{{count}} crates",
+   "settings.about.notices.crates.appliesTo": "Applies to {{names}}",
++  "settings.about.unofficial": "Unofficial build for Windows 7/8/8.1 by",
++  "settings.about.basedOn": "Based on OpenCode, MIT License, © Anomaly Innovations, Inc.",
+   "settings.about.tagline": "AI can’t build great software, without you",
+   "settings.about.copyright": "© Anomaly Innovations, Inc.",
+   "settings.preferences.description": "Customize preferences and theme and default behavior",
+diff --git a/packages/app/src/settings/about/about.tsx b/packages/app/src/settings/about/about.tsx
+index ab9241d..7be393d 100644
+--- a/packages/app/src/settings/about/about.tsx
++++ b/packages/app/src/settings/about/about.tsx
+@@ -1,4 +1,4 @@
+-import { createEffect, createMemo, createResource, createSignal, onCleanup, untrack } from "solid-js"
++import { createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js"
+ import { writeClipboard } from "@opencode/session-ui/copy"
+ import { useDialog } from "@opencode/ui/context/dialog"
+ import { Tooltip } from "@opencode/ui/tooltip"
+@@ -6,10 +6,6 @@ import { useLanguage } from "@/runtime/i18n/language"
+ import { usePlatform } from "@/runtime/platform/platform"
+ import { ExternalLink } from "@/runtime/platform/external-link"
+ import { showToast } from "@/shell/notifications/toast"
+-import legal from "./legal.svg"
+-import anomalyBrush from "./anomaly-brush.svg"
+-import { AnimatedWordmark } from "./animated-wordmark"
+-import { FALLBACK_OTHER_CONTRIBUTORS, loadOtherContributorCount } from "./contributors"
+ import {
+   INITIAL_ABOUT_COPY_STATE,
+   selectAboutCopyView,
+@@ -18,26 +14,10 @@ import {
+   type AboutCopyEvent,
+ } from "./machine"
  
- import { execFile, spawn } from "node:child_process"
- import { existsSync, readFileSync } from "node:fs"
-+import nodePath from "node:path"
- import { promisify } from "node:util"
- import { app } from "electron"
- import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
-@@ -89,6 +90,18 @@
+-const writers = [
+-  "thdxr",
+-  "adamdotdev",
+-  "rekram1-node",
+-  "kitlangton",
+-  "iamdavidhill",
+-  "jayair",
+-  "fwang",
+-  "brendonovich",
+-  "nexxeln",
+-  "hona",
+-  "kommander",
+-  "jlongster",
+-  "vimtor",
+-  "r44vcorp",
+-  "simonklee",
+-  "arvsrn",
+-] as const
+-
+-const illustrators = ["usrnk1", "ludvigrask_", "arvsrn", "iamdavidhill"] as const
++// This build is published by its maintainer; the About page stays small and static so it opens instantly on old PCs.
++const BUILDER = "engpes85-coder"
++const BUILDER_URL = "https://github.com/engpes85-coder/opencode-legacy"
++const UPSTREAM_URL = "https://github.com/anomalyco/opencode"
  
-   yield* Effect.logInfo("v2 CLI executable resolved", { bundled, packaged: app.isPackaged })
-   const version = yield* bundledVersion(bundled)
-+
-+  // Windows 7/8/8.1 build: the Bun/Node 26 executable cannot start there, so the server bundle runs on a
-+  // legacy-compatible node.exe shipped in resources/win7 (see WIN7-BUILD.md).
-+  const legacy = legacyServer()
-+  if (legacy) {
-+    yield* Effect.logInfo("v2 CLI using legacy Node runtime", legacy)
-+    return {
-+      version,
-+      binary: undefined,
-+      command: [legacy.node, "--use-system-ca", "--disable-warning=ExperimentalWarning", legacy.entry],
-+    }
-+  }
-   const binary = app.isPackaged || isolated ? yield* installCli(bundled, version) : bundled
+ export function SettingsAbout(props: { active: boolean }) {
+   const language = useLanguage()
+@@ -49,12 +29,6 @@ export function SettingsAbout(props: { active: boolean }) {
+   const versionLabel = () => language.t("settings.about.version", { version: version() })
+   let copyTimer: ReturnType<typeof setTimeout> | undefined
  
-   return { version, binary, command: [binary] }
-@@ -226,6 +239,13 @@
+-  const [otherContributors] = createResource(
+-    () => props.active || undefined,
+-    () => loadOtherContributorCount(platform.fetch ?? fetch),
+-    { initialValue: FALLBACK_OTHER_CONTRIBUTORS },
+-  )
+-
+   const dispatchCopy = (event: AboutCopyEvent) =>
+     untrack(() => {
+       const previous = copyState()
+@@ -92,21 +66,6 @@ export function SettingsAbout(props: { active: boolean }) {
+   })
+   onCleanup(() => dispatchCopy({ type: "disposed" }))
+ 
+-  const credit = (name: string) => (
+-    <bdi dir="ltr">
+-      <ExternalLink href={profile(name)}>{name}</ExternalLink>
+-    </bdi>
+-  )
+-
+-  const writerCredits = () => [
+-    ...writers.map(credit),
+-    <ExternalLink href="https://github.com/anomalyco/opencode/graphs/contributors">
+-      {language.plural("settings.about.otherContributor", otherContributors.latest, {
+-        count: otherContributors.latest,
+-      })}
+-    </ExternalLink>,
+-  ]
+-
+   const showNotices = async () => {
+     // The license texts load only when someone reads them.
+     const loaded = await import("./notices/dialog").catch(() => undefined)
+@@ -147,53 +106,28 @@ export function SettingsAbout(props: { active: boolean }) {
+         <p>{language.t("settings.about.license")}</p>
+       </div>
+ 
+-      <AnimatedWordmark active={props.active} />
+-
+       <div class="settings-about-credits">
+-        <p>{language.rich("settings.about.writtenByNames", { names: language.list(writerCredits()) })}</p>
+         <p>
+-          {language.rich("settings.about.illustratedByNames", {
+-            names: language.list(illustrators.map(credit)),
+-          })}
++          {language.t("settings.about.unofficial")}{" "}
++          <bdi dir="ltr">
++            <ExternalLink href={BUILDER_URL}>{BUILDER}</ExternalLink>
++          </bdi>
+         </p>
+       </div>
+ 
+-      <div class="settings-about-publication">
+-        <p>{language.t("settings.about.firstPublished")}</p>
+-        <p>{language.t("settings.about.firstIllustrated")}</p>
+-      </div>
+-
+-      <p class="settings-about-faint">
+-        <ExternalLink href="https://opencode.ai">
+-          <bdi dir="ltr">{language.t("settings.about.website")}</bdi>
+-        </ExternalLink>
+-      </p>
+-
+       <div class="settings-about-details">
+-        <p>{language.t("settings.about.description")}</p>
+-        <p>{language.t("settings.about.trademark")}</p>
+-        <p>{language.t("settings.about.typeset")}</p>
++        <p>
++          {language.t("settings.about.basedOn")}{" "}
++          <bdi dir="ltr">
++            <ExternalLink href={UPSTREAM_URL}>github.com/anomalyco/opencode</ExternalLink>
++          </bdi>
++        </p>
+         <p>
+           <button type="button" class="settings-about-link" onClick={() => void showNotices()}>
+             {language.t("settings.about.notices.title")}
+           </button>
+         </p>
+       </div>
+-
+-      <p>{language.t("settings.about.tagline")}</p>
+-      <img class="settings-about-legal" src={legal} alt="" />
+-      <div class="settings-about-copyright">
+-        <p>{language.t("settings.about.copyright")}</p>
+-        <img class="settings-about-anomaly-brush" src={anomalyBrush} alt="" />
+-      </div>
+     </div>
    )
- })
- 
-+function legacyServer() {
-+  if (process.platform !== "win32" || !app.isPackaged) return undefined
-+  const node = nodePath.join(process.resourcesPath, "win7", "node.exe")
-+  const entry = nodePath.join(process.resourcesPath, "win7", "server", "opencode.mjs")
-+  return existsSync(node) && existsSync(entry) ? { node, entry } : undefined
-+}
-+
- function executableName() {
-   return process.platform === "win32" ? "opencode-cli.exe" : "opencode-cli"
  }
---- a/packages/desktop/src/main/lifecycle/configure.ts
-+++ b/packages/desktop/src/main/lifecycle/configure.ts
-@@ -1,7 +1,7 @@
- import { randomUUID } from "node:crypto"
- import { mkdirSync, rmSync } from "node:fs"
- import { enableCompileCache } from "node:module"
--import { homedir, tmpdir } from "node:os"
-+import { homedir, release, tmpdir } from "node:os"
- import path from "node:path"
- import { app } from "electron"
- import { debugBuild, memoryLogInterval } from "@opencode/gui-plugins/debug/options"
-@@ -31,6 +31,8 @@
-   // Chromium animates each mouse-wheel notch on Linux; native Linux apps scroll by the full delta immediately.
-   if (process.platform === "linux") app.commandLine.appendSwitch("disable-smooth-scrolling")
- 
-+  applyLowEndSwitches()
-+
-   const build = { packaged: app.isPackaged, channel: CHANNEL }
- 
-   const debug = debuggingSwitches(build, process.env.OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT,
-@@ -99,3 +101,17 @@
- 
-   return root
- }
-+
-+// Windows 7/8/8.1 (NT 6.x) PCs and anything started with OPENCODE_LOWEND=1 get a lighter Chromium:
-+// fewer renderer processes, no smooth-scroll animation, low-end memory mode. OPENCODE_DISABLE_GPU=1 turns
-+// off hardware acceleration for machines whose old graphics drivers crash the GPU process.
-+function applyLowEndSwitches() {
-+  const legacyWindows = process.platform === "win32" && Number.parseInt(release().split(".")[0] ?? "10", 10) < 10
-+  const lowEnd = legacyWindows || process.env.OPENCODE_LOWEND === "1"
-+  if (process.env.OPENCODE_DISABLE_GPU === "1") app.disableHardwareAcceleration()
-+  if (!lowEnd || process.env.OPENCODE_LOWEND === "0") return
-+  app.commandLine.appendSwitch("disable-smooth-scrolling")
-+  app.commandLine.appendSwitch("enable-low-end-device-mode")
-+  app.commandLine.appendSwitch("renderer-process-limit", "2")
-+  app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion,HardwareMediaKeyHandling")
-+}
+-
+-function profile(name: string) {
+-  if (name === "r44vcorp") return "https://github.com/R44VC0RP"
+-
+-  if (name === "ludvigrask_") return "https://x.com/ludvigrask_"
+-
+-  return `https://github.com/${name}`
+-}
+diff --git a/packages/desktop/electron-builder.config.ts b/packages/desktop/electron-builder.config.ts
+index d4697d9..7808787 100644
 --- a/packages/desktop/electron-builder.config.ts
 +++ b/packages/desktop/electron-builder.config.ts
-@@ -66,6 +66,15 @@
+@@ -66,6 +66,15 @@ const getBase = (appId: string): Configuration => {
    const desktopName = `${appId}.desktop`
  
    return {
@@ -97,7 +182,7 @@
      artifactName: "opencode-desktop-${os}-${arch}.${ext}",
      directories: {
        output: "dist",
-@@ -111,6 +120,8 @@
+@@ -111,6 +120,8 @@ const getBase = (appId: string): Configuration => {
          to: "",
          filter: ["opencode-cli", "opencode-cli.exe", "opencode-cli.version"],
        },
@@ -106,7 +191,7 @@
      ],
      // Electron stores cookies in plain text by default. The browser pane keeps sign-ins, so encrypt them with the OS
      // key store (Keychain, DPAPI, libsecret or kwallet). This is one-way: turning it off again loses every cookie.
-@@ -139,11 +150,14 @@
+@@ -139,11 +150,14 @@ const getBase = (appId: string): Configuration => {
        const resources = context.packager.getResourcesDir(context.appOutDir)
        await verifyPreviewBinding(resources, context.electronPlatformName, arch)
        const cli = path.join(resources, context.electronPlatformName === "win32" ? "opencode-cli.exe" : "opencode-cli")
@@ -124,3 +209,287 @@
        const version = path.join(path.dirname(cli), "opencode-cli.version")
  
        if ((await stat(version)).size === 0) throw new Error(`Bundled CLI version must be a non-empty file: ${version}`)
+diff --git a/packages/desktop/src/main/lifecycle/configure.ts b/packages/desktop/src/main/lifecycle/configure.ts
+index 2a0b607..60e1f1f 100644
+--- a/packages/desktop/src/main/lifecycle/configure.ts
++++ b/packages/desktop/src/main/lifecycle/configure.ts
+@@ -1,7 +1,7 @@
+ import { randomUUID } from "node:crypto"
+ import { mkdirSync, rmSync } from "node:fs"
+ import { enableCompileCache } from "node:module"
+-import { homedir, tmpdir } from "node:os"
++import { homedir, release, tmpdir } from "node:os"
+ import path from "node:path"
+ import { app } from "electron"
+ import { debugBuild, memoryLogInterval } from "@opencode/gui-plugins/debug/options"
+@@ -31,6 +31,8 @@ export function configureApplication() {
+   // Chromium animates each mouse-wheel notch on Linux; native Linux apps scroll by the full delta immediately.
+   if (process.platform === "linux") app.commandLine.appendSwitch("disable-smooth-scrolling")
+ 
++  applyLowEndSwitches()
++
+   const build = { packaged: app.isPackaged, channel: CHANNEL }
+ 
+   const debug = debuggingSwitches(build, process.env.OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT,
+@@ -99,3 +101,35 @@ function createTestRoot() {
+ 
+   return root
+ }
++
++// OPENCODE_LOWEND picks the level: unset means 1 on Windows 7/8/8.1 (NT 6.x) and 0 elsewhere.
++//   0 = off
++//   1 = lighter Chromium: low-end memory mode, no smooth scrolling, no background network chatter, 2 renderers
++//   2 = level 1 plus a single renderer and no site isolation. Saves the most memory; only use it if the app
++//       never opens untrusted websites.
++// OPENCODE_DISABLE_GPU=1 turns off hardware acceleration for machines whose old drivers crash the GPU process.
++function applyLowEndSwitches() {
++  const legacyWindows = process.platform === "win32" && Number.parseInt(release().split(".")[0] ?? "10", 10) < 10
++  const level = process.env.OPENCODE_LOWEND ?? (legacyWindows ? "1" : "0")
++  if (process.env.OPENCODE_DISABLE_GPU === "1") app.disableHardwareAcceleration()
++  if (level !== "1" && level !== "2") return
++  const disabled = [
++    "CalculateNativeWinOcclusion",
++    "HardwareMediaKeyHandling",
++    "Translate",
++    "MediaRouter",
++    "OptimizationHints",
++    "AutofillServerCommunication",
++  ]
++  app.commandLine.appendSwitch("disable-smooth-scrolling")
++  app.commandLine.appendSwitch("enable-low-end-device-mode")
++  app.commandLine.appendSwitch("disable-background-networking")
++  app.commandLine.appendSwitch("disable-sync")
++  app.commandLine.appendSwitch("no-pings")
++  if (level === "2") {
++    disabled.push("IsolateOrigins", "site-per-process")
++    app.commandLine.appendSwitch("disable-site-isolation-trials")
++    app.commandLine.appendSwitch("renderer-process-limit", "1")
++  } else app.commandLine.appendSwitch("renderer-process-limit", "2")
++  app.commandLine.appendSwitch("disable-features", disabled.join(","))
++}
+diff --git a/packages/desktop/src/main/service/desktop-cli.ts b/packages/desktop/src/main/service/desktop-cli.ts
+index 7d14ee3..100a97e 100644
+--- a/packages/desktop/src/main/service/desktop-cli.ts
++++ b/packages/desktop/src/main/service/desktop-cli.ts
+@@ -2,6 +2,7 @@ export * as DesktopCli from "./desktop-cli"
+ 
+ import { execFile, spawn } from "node:child_process"
+ import { existsSync, readFileSync } from "node:fs"
++import nodePath from "node:path"
+ import { promisify } from "node:util"
+ import { app } from "electron"
+ import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
+@@ -89,6 +90,20 @@ const resolveBundledCli = Effect.fn("DesktopCli.resolveBundled")(function* (isol
+ 
+   yield* Effect.logInfo("v2 CLI executable resolved", { bundled, packaged: app.isPackaged })
+   const version = yield* bundledVersion(bundled)
++
++  // Windows 7/8/8.1 build: the Bun/Node 26 executable cannot start there, so the server bundle runs on a
++  // legacy-compatible node.exe shipped in resources/win7 (see WIN7-BUILD.md).
++  const legacy = legacyServer()
++  if (legacy) {
++    yield* Effect.logInfo("v2 CLI using legacy Node runtime", legacy)
++    // The server must not replace itself with an official Windows 10+ build.
++    process.env.OPENCODE_DISABLE_AUTOUPDATE ??= "1"
++    return {
++      version,
++      binary: undefined,
++      command: [legacy.node, "--use-system-ca", "--disable-warning=ExperimentalWarning", legacy.entry],
++    }
++  }
+   const binary = app.isPackaged || isolated ? yield* installCli(bundled, version) : bundled
+ 
+   return { version, binary, command: [binary] }
+@@ -226,6 +241,13 @@ const runInstaller = Effect.fn("DesktopCli.installForUser")(function* (binary: s
+   )
+ })
+ 
++function legacyServer() {
++  if (process.platform !== "win32" || !app.isPackaged) return undefined
++  const node = nodePath.join(process.resourcesPath, "win7", "node.exe")
++  const entry = nodePath.join(process.resourcesPath, "win7", "server", "opencode.mjs")
++  return existsSync(node) && existsSync(entry) ? { node, entry } : undefined
++}
++
+ function executableName() {
+   return process.platform === "win32" ? "opencode-cli.exe" : "opencode-cli"
+ }
+diff --git a/packages/gui-plugins/src/updater/action.ts b/packages/gui-plugins/src/updater/action.ts
+index 669472b..f5dafe7 100644
+--- a/packages/gui-plugins/src/updater/action.ts
++++ b/packages/gui-plugins/src/updater/action.ts
+@@ -26,7 +26,7 @@ function mainAction(state: UpdaterState | undefined) {
+     case "ready":
+       return { label: "action.installRestart" as const, run: "install" as const }
+     case "download-required":
+-      return { label: "action.download" as const, run: "install" as const }
++      return { label: "action.download" as const, description: "check.descriptionDownload" as const, run: "install" as const }
+     case "installing":
+       return { label: "action.installing" as const }
+     case "disabled":
+diff --git a/packages/gui-plugins/src/updater/i18n/en.ts b/packages/gui-plugins/src/updater/i18n/en.ts
+index 840cad6..ec07f8c 100644
+--- a/packages/gui-plugins/src/updater/i18n/en.ts
++++ b/packages/gui-plugins/src/updater/i18n/en.ts
+@@ -5,20 +5,23 @@ export default {
+   "action.checking": "Checking…",
+   "action.downloading": "Downloading…",
+   "action.installRestart": "Install and restart",
+-  "action.download": "Download OpenCode",
++  "action.download": "Download update",
+   "action.installing": "Installing…",
+   "action.reload": "Reload to update",
+   "action.reloading": "Reloading…",
+   "toast.latest.title": "You're up to date",
+   "toast.latest.description": "You're running the latest version of OpenCode.",
+-  "migration.title": "Move from Beta to Stable",
++  "migration.title": "New version available",
+   "migration.description":
+-    "For now, OpenCode Beta is moving to OpenCode Stable. Download version {{version}}, then install OpenCode from the disk image to continue receiving updates.",
++    "Version {{version}} of this Windows 7/8/8.1 build is available. Download the new portable zip from the GitHub releases page, unzip it, and copy resources\\win7\\node.exe from your current folder into the new one. Your projects and settings are kept.",
++  "legacy.title": "Update available",
++  "legacy.message": "Version {{version}} is available on GitHub. Open the download page?",
++  "check.descriptionDownload": "A newer version is available. This opens the download page on GitHub.",
+   "section.title": "Updates",
+   "releaseNotes.title": "Release notes",
+   "releaseNotes.description": "Show What's New popups after updates",
+   "check.title": "Check for updates",
+-  "check.description": "Manually check for updates and install if available",
++  "check.description": "Check GitHub for a newer version of this build",
+   "check.unavailable": "This build is updated outside OpenCode, for example by your package manager.",
+   "menu.check": "Check for Updates…",
+   "dialog.checkFailed.message": "Update check failed.",
+diff --git a/packages/gui-plugins/src/updater/legacy-platform.ts b/packages/gui-plugins/src/updater/legacy-platform.ts
+new file mode 100644
+index 0000000..811b69c
+--- /dev/null
++++ b/packages/gui-plugins/src/updater/legacy-platform.ts
+@@ -0,0 +1,63 @@
++import { existsSync, readFileSync } from "node:fs"
++import { join } from "node:path"
++import { app, net, shell } from "electron"
++import { Effect } from "effect"
++import type { Platform } from "./machine"
++
++// Update source for the Windows 7/8/8.1 build: the GitHub releases of the fork that publishes it.
++const RELEASES_API = "https://api.github.com/repos/engpes85-coder/opencode-legacy/releases?per_page=10"
++const RELEASES_PREFIX = "https://github.com/engpes85-coder/opencode-legacy/"
++
++/** True for the legacy Windows build, which ships its server runtime in resources/win7. */
++export function legacyBuild() {
++  return (
++    process.platform === "win32" &&
++    app.isPackaged &&
++    existsSync(join(process.resourcesPath, "win7", "server", "opencode.mjs"))
++  )
++}
++
++// The release workflow writes the tag it publishes (for example v2.3.1-win788.2) next to the server bundle.
++function installedTag() {
++  try {
++    const tag = readFileSync(join(process.resourcesPath, "win7", "release-tag.txt"), "utf8").trim()
++    if (tag) return tag
++  } catch {}
++  return `v${app.getVersion()}-win788.0`
++}
++
++const numbers = (tag: string) => (tag.match(/\d+/g) ?? []).map(Number)
++
++function compare(a: number[], b: number[]) {
++  for (let i = 0; i < Math.max(a.length, b.length); i++) {
++    const diff = (a[i] ?? 0) - (b[i] ?? 0)
++    if (diff !== 0) return diff
++  }
++  return 0
++}
++
++export const make = Effect.fn("Updater.legacyPlatform")(function* () {
++  return {
++    checkForUpdate: Effect.tryPromise({
++      try: async () => {
++        const response = await net.fetch(RELEASES_API, {
++          headers: { Accept: "application/vnd.github+json", "User-Agent": `opencode-legacy/${app.getVersion()}` },
++        })
++        if (!response.ok) throw new Error(`GitHub answered ${response.status}`)
++        const releases = (await response.json()) as Array<{ tag_name: string; draft: boolean; html_url: string }>
++        const latest = releases.find((release) => !release.draft && /^v\d/.test(release.tag_name))
++        if (!latest || compare(numbers(latest.tag_name), numbers(installedTag())) <= 0) return undefined
++
++        return { mode: "external", version: latest.tag_name.replace(/^v/, ""), url: latest.html_url } as const
++      },
++      catch: (error) => error,
++    }),
++    // Nothing is downloaded or installed in place: the person downloads the new portable zip themselves.
++    stageUpdate: () => Effect.void,
++    installAndRestart: Effect.void,
++    externalInstall: (url: string) =>
++      url.startsWith(RELEASES_PREFIX)
++        ? Effect.tryPromise({ try: () => shell.openExternal(url), catch: (error) => error })
++        : Effect.fail(new Error("Refusing to open a link outside the release page")),
++  } satisfies Platform
++})
+diff --git a/packages/gui-plugins/src/updater/main.ts b/packages/gui-plugins/src/updater/main.ts
+index eb5a358..a7dbf8a 100644
+--- a/packages/gui-plugins/src/updater/main.ts
++++ b/packages/gui-plugins/src/updater/main.ts
+@@ -7,6 +7,7 @@ import { MenubarItem, type Plugin } from "@opencode/plugin/gui/main"
+ import { Updater } from "@opencode/plugin/gui/updater"
+ import { logContext } from "./log"
+ import { make } from "./machine"
++import { legacyBuild, make as makeLegacyPlatform } from "./legacy-platform"
+ 
+ const setup: Plugin.MainSetup = async (ctx) => {
+   const builtin = builtinMainContext(ctx)
+@@ -14,7 +15,9 @@ const setup: Plugin.MainSetup = async (ctx) => {
+   const lifecycle = builtin.lifecycle
+   // electron-updater reads its feed from app-update.yml. Distro packages that update the app themselves (such as the
+   // AUR's opencode-desktop-bin) delete it, and every check would then fail.
+-  const enabled = build.packaged && existsSync(join(process.resourcesPath, "app-update.yml"))
++  // The legacy Windows build checks its own GitHub releases and never uses the official update feed.
++  const legacy = legacyBuild()
++  const enabled = legacy || (build.packaged && existsSync(join(process.resourcesPath, "app-update.yml")))
+   // Holds no resources, so it needs no cleanup.
+   const context = logContext(ctx.log.write)
+   const runPromise = Effect.runPromiseWith(context)
+@@ -30,9 +33,11 @@ const setup: Plugin.MainSetup = async (ctx) => {
+   })
+ 
+   // electron-updater loads only in packaged builds with a feed, after the first window is up.
+-  const platform = enabled
+-    ? await import("./platform").then((module) => runPromise(module.make(build.channel)))
+-    : undefined
++  const platform = legacy
++    ? await runPromise(makeLegacyPlatform())
++    : enabled
++      ? await import("./platform").then((module) => runPromise(module.make(build.channel)))
++      : undefined
+ 
+   if (ctx.signal.aborted) return
+   const scope = Scope.makeUnsafe()
+@@ -93,6 +98,26 @@ const setup: Plugin.MainSetup = async (ctx) => {
+       return
+     }
+ 
++    if (state.status === "download-required") {
++      const answer = yield* promise(() =>
++        dialog.showMessageBox({
++          type: "info",
++          message: ctx.t("legacy.message", { version: state.version }),
++          title: ctx.t("legacy.title"),
++          buttons: [ctx.t("action.download"), ctx.t("dialog.later")],
++          defaultId: 0,
++          cancelId: 1,
++        }),
++      )
++
++      if (answer.response === 0)
++        yield* updater.install.pipe(
++          Effect.catch((error) => Effect.logWarning("opening the release page failed", { message: error.message })),
++        )
++
++      return
++    }
++
+     if (state.status !== "ready") return
+ 
+     const response = yield* promise(() =>
