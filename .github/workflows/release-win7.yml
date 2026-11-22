@@ -1,0 +1,197 @@
+name: release-win7
+
+on:
+  schedule:
+    # 03:00 UTC on the 1st of every month. Use "0 3 1,16 * *" for every 15 days.
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: upstream branch, tag or commit to build
+        default: dev
+      force:
+        description: build even if this upstream commit was already released
+        type: boolean
+        default: false
+      publish:
+        description: publish a GitHub release (untick for a test build)
+        type: boolean
+        default: true
+      electron_url:
+        description: electron-legacy win32-x64 zip
+        default: https://github.com/Alex313031/electron-legacy/releases/download/v44.2.0/electron-v44.2.0-win32-x64.zip
+      electron_version:
+        description: version inside that zip
+        default: "44.2.0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-win7
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      OPENCODE_CHANNEL: dev
+      OPENCODE_TARGET: windows-x64
+      ELECTRON_URL: ${{ inputs.electron_url || 'https://github.com/Alex313031/electron-legacy/releases/download/v44.2.0/electron-v44.2.0-win32-x64.zip' }}
+      ELECTRON_VERSION: ${{ inputs.electron_version || '44.2.0' }}
+    steps:
+      - name: Keep LF line endings
+        shell: bash
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - name: Find the upstream commit and check if it is already released
+        id: up
+        shell: bash
+        run: |
+          cp opencode-win7.patch "$RUNNER_TEMP/win7.patch"
+          git remote add upstream https://github.com/anomalyco/opencode.git
+          git fetch --depth=1 upstream "${{ inputs.upstream_ref || 'dev' }}"
+          sha=$(git rev-parse FETCH_HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          skip=false
+          last=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' || true)
+          if [ -n "$last" ] && [ "${{ inputs.force }}" != "true" ]; then
+            if gh release view "$last" --json body --jq .body | grep -q "$sha"; then skip=true; fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          echo "Upstream commit $sha, skip=$skip"
+
+      - name: Check out upstream and apply the Windows 7/8 patch
+        if: steps.up.outputs.skip != 'true'
+        shell: bash
+        run: |
+          git checkout --force "${{ steps.up.outputs.sha }}"
+          git apply --whitespace=nowarn "$RUNNER_TEMP/win7.patch" || {
+            echo "::error::The Windows 7/8 patch no longer applies to upstream ${{ steps.up.outputs.sha }}. The patch needs updating."
+            exit 1
+          }
+          ver=$(node -p "require('./packages/cli/package.json').version")
+          echo "OPENCODE_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Setup Bun and install dependencies
+        if: steps.up.outputs.skip != 'true'
+        uses: ./.github/actions/setup-bun
+
+      - name: Build server bundle
+        if: steps.up.outputs.skip != 'true'
+        shell: bash
+        working-directory: packages/cli
+        run: bun run build:node --bundle-only
+
+      - name: Stage server bundle for Node 22
+        if: steps.up.outputs.skip != 'true'
+        shell: bash
+        run: |
+          mkdir -p packages/desktop/resources/win7/server
+          cp packages/cli/dist-node/opencode.mjs packages/desktop/resources/win7/server/
+          cp -r packages/cli/dist-node/assets packages/desktop/resources/win7/server/
+          printf '%s' "$OPENCODE_VERSION" > packages/desktop/resources/opencode-cli.version
+          cat > fix-bundle.cjs <<'EOT'
+          const fs = require("fs")
+          const p = "packages/desktop/resources/win7/server/opencode.mjs"
+          let s = fs.readFileSync(p, "utf8")
+          const a = "getAssetKeys as __ocAssetKeys,"
+          const b = "const __filename=import.meta.filename,"
+          if (!s.includes(a) || !s.includes(b)) throw new Error("bundle prelude not found")
+          s = s.replace(a, "").replace(b, "const __ocAssetKeys=()=>[];" + b)
+          fs.writeFileSync(p, s)
+          EOT
+          node fix-bundle.cjs
+
+      - name: Install Node 22.19 for the server test
+        if: steps.up.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+
+      - name: Test that the server runs on Node 22.19
+        if: steps.up.outputs.skip != 'true'
+        shell: bash
+        run: node packages/desktop/resources/win7/server/opencode.mjs --version
+
+      - name: Download legacy Electron
+        if: steps.up.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:ELECTRON_URL -OutFile electron.zip
+          Expand-Archive electron.zip -DestinationPath electron-dist
+
+      - name: Build desktop app
+        if: steps.up.outputs.skip != 'true'
+        shell: bash
+        working-directory: packages/desktop
+        env:
+          OPENCODE_WIN7: "1"
+          OPENCODE_ELECTRON_DIST: ${{ github.workspace }}/electron-dist
+          OPENCODE_ELECTRON_VERSION: ${{ env.ELECTRON_VERSION }}
+        run: |
+          bun ./script/copy-icons.ts prod   # black logo; the app channel stays dev, the tested one
+          bunx electron-vite build
+          bunx electron-builder --win --x64 --dir --publish never --config electron-builder.config.ts
+
+      - name: Make the portable zip
+        if: steps.up.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $dir = "packages/desktop/dist/win-unpacked"
+          $prefix = "v$($env:OPENCODE_VERSION)-win788."
+          $used = git ls-remote --tags --refs origin | ForEach-Object { ($_ -split "refs/tags/")[1] } | Where-Object { $_ -like "$prefix*" } | ForEach-Object { [int](($_.Substring($prefix.Length)) -replace '\..*$', '') }
+          $next = 1
+          if ($used) { $next = ($used | Measure-Object -Maximum).Maximum + 1 }
+          $tag = "$prefix$next"
+          Remove-Item "$dir/resources/app-update.yml" -ErrorAction SilentlyContinue
+          Set-Content "$dir/resources/win7/release-tag.txt" $tag -NoNewline
+          Set-Content "$dir/resources/win7/PUT-YOUR-node.exe-HERE.txt" "Copy your Node.js 22.15+ x64 node.exe into this folder (resources\win7\node.exe), then start the app."
+          $name = "opencode-desktop-win7-x64-portable-$tag.zip"
+          Compress-Archive -Path "$dir/*" -DestinationPath $name
+          "ZIP=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Write release notes
+        if: steps.up.outputs.skip != 'true'
+        shell: bash
+        run: |
+          cat > notes.md <<EOT
+          Unofficial community build of OpenCode Desktop ${OPENCODE_VERSION} for Windows 7, 8 and 8.1 (64-bit). Not affiliated with the OpenCode project.
+
+          Upstream commit: ${{ steps.up.outputs.sha }}
+
+          ## Install (portable, nothing is installed)
+          1. Unzip the file below.
+          2. Copy your Node.js x64 node.exe (version 22.15 or newer) to resources\win7\node.exe
+          3. Start the app (the .exe in the unzipped folder)
+
+          ## Notes
+          - Runs on the community electron-legacy ${ELECTRON_VERSION} instead of stock Electron.
+          - Built automatically. The app does not update itself: download the newest release from this page.
+          - The built-in terminal pane needs Windows 10 and may not work.
+          - The legacy Chromium engine gets no security fixes; do not open untrusted websites inside the app.
+          EOT
+
+      - name: Keep the zip as a workflow artifact (test runs only)
+        if: steps.up.outputs.skip != 'true' && github.event_name == 'workflow_dispatch' && !inputs.publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-win7-portable
+          path: ${{ env.ZIP }}
+          retention-days: 7
+
+      - name: Publish the GitHub release
+        if: steps.up.outputs.skip != 'true' && (github.event_name != 'workflow_dispatch' || inputs.publish)
+        shell: bash
+        run: |
+          gh release create "$TAG" "$ZIP" \
+            --title "OpenCode Desktop ${OPENCODE_VERSION} for Windows 7/8/8.1 (unofficial, x64)" \
+            --notes-file notes.md \
+            --prerelease \
+            --target "${{ github.event.repository.default_branch }}"
