@@ -1,7 +1,7 @@
 name: cleanup-inherited-tags
 
 # One-time cleanup: removes the tags this fork inherited from the original OpenCode repository.
-# Tags that belong to this build (names like v2.3.0-win7.20261215) are always kept.
+# Tags that belong to this build (names like v2.3.0-win788.1) are always kept.
 # The original repository keeps its own tags; only this fork is changed.
 
 on:
@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           git ls-remote --tags --refs origin | sed 's#.*refs/tags/##' | sort -u > all.txt
-          grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-win7\.[0-9.]+$' all.txt > keep.txt || true
+          grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-win7(88)?\.[0-9.]+$' all.txt > keep.txt || true
           grep -vxFf keep.txt all.txt > delete.txt || true
           echo "Tags in this fork: $(wc -l < all.txt)"
           echo "Tags that stay (yours): $(wc -l < keep.txt)"
